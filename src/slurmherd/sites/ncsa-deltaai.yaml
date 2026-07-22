@@ -1,0 +1,48 @@
+# NCSA DeltaAI (ACCESS / NAIRR Pilot).
+#
+# A different machine from Delta, with its own login host and its own
+# allocation. Accounts are named <project>-dtai-gpu.
+#
+#     clusters:
+#       deltaai:
+#         site: ncsa-deltaai
+#         connect: {host: deltaai}
+#         resources: {account: bbxx-dtai-gpu}
+name: ncsa-deltaai
+description: NCSA DeltaAI -- NVIDIA GH200 (ACCESS / NAIRR Pilot)
+docs: https://docs.ncsa.illinois.edu/systems/deltaai/en/latest/
+scheduler: slurm
+gpu_flag: gpus_per_node
+account_required: true
+mail_domain: illinois.edu
+
+vars:
+  home: /u/{{ user }}
+
+resources:
+  nodes: 1
+  ntasks: 1
+  partition: ghx4
+  time: "24:00:00"
+
+env:
+  purge_modules: false
+
+limits:
+  max_submit_per_pass: 8
+
+partitions:
+  ghx4:
+    max_time: "48:00:00"
+    gpus: true
+    description: 4x NVIDIA GH200 Grace-Hopper superchips per node
+  ghx4-interactive:
+    max_time: "01:00:00"
+    gpus: true
+
+notes:
+  - "Every job needs --account: <project>-dtai-gpu."
+  - "GH200 is arm64 (aarch64). x86 wheels and conda packages will not run here --"
+  - "  build a separate environment rather than reusing a Delta or MSI one."
+  - "Home is /u/<username>; fast scratch under /work/nvme and /work/hdd."
+  - "Login requires NCSA 2FA; run `slurmherd connect deltaai` once per session."

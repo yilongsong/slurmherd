@@ -1,0 +1,71 @@
+# NCSA Delta (ACCESS / NAIRR Pilot).
+#
+# Delta *requires* an account (allocation) on every job, and the account name
+# encodes the resource: <project>-delta-gpu for GPU queues, <project>-delta-cpu
+# for CPU queues. Set it per cluster in your slurmherd.yaml:
+#
+#     clusters:
+#       delta:
+#         site: ncsa-delta
+#         connect: {host: delta}
+#         resources: {account: bbxx-delta-gpu}
+#
+# Confirm partitions and your accounts with `slurmherd doctor`.
+name: ncsa-delta
+description: NCSA Delta (ACCESS / NAIRR Pilot)
+docs: https://docs.ncsa.illinois.edu/systems/delta/en/latest/
+scheduler: slurm
+gpu_flag: gpus_per_node
+account_required: true
+mail_domain: illinois.edu
+
+vars:
+  home: /u/{{ user }}
+
+resources:
+  nodes: 1
+  ntasks: 1
+  partition: gpuA100x4
+  time: "24:00:00"
+
+env:
+  purge_modules: false
+
+limits:
+  max_submit_per_pass: 8
+
+partitions:
+  cpu:
+    max_time: "48:00:00"
+    gpus: false
+    description: CPU compute nodes
+  cpu-interactive:
+    max_time: "01:00:00"
+    gpus: false
+  gpuA100x4:
+    max_time: "48:00:00"
+    gpus: true
+    description: 4x NVIDIA A100 40GB per node
+  gpuA100x8:
+    max_time: "48:00:00"
+    gpus: true
+    description: 8x NVIDIA A100 40GB per node
+  gpuA40x4:
+    max_time: "48:00:00"
+    gpus: true
+    description: 4x NVIDIA A40 per node
+  gpuMI100x8:
+    max_time: "48:00:00"
+    gpus: true
+    description: 8x AMD MI100 per node
+  gpuA100x4-interactive:
+    max_time: "01:00:00"
+    gpus: true
+
+notes:
+  - "Every job needs --account: <project>-delta-gpu or <project>-delta-cpu."
+  - "Delta and DeltaAI are different machines with different logins and allocations."
+  - "Home is /u/<username>; project space /projects/<account>; fast scratch /work/nvme and /work/hdd."
+  - "GPUs are requested with --gpus-per-node, which is what this profile emits."
+  - "Login requires NCSA 2FA; run `slurmherd connect delta` once per session."
+  - "Password resets: https://identity.ncsa.illinois.edu/reset"

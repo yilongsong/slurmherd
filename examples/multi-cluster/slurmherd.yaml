@@ -1,0 +1,44 @@
+# Driving three clusters from one config.
+#
+# The whole point of running locally: `slurmherd status` shows MSI, Delta and
+# DeltaAI together, and `slurmherd up` submits to all three in one pass. A
+# cluster being down is reported; the others carry on.
+#
+# Each experiment picks a cluster; moving a group of runs to another machine is
+# a one-line change.
+version: 1
+name: multi
+
+vars:
+  project_id: bbxx        # your ACCESS/NAIRR allocation id
+
+clusters:
+  msi:
+    site: umn-msi
+    connect: {host: msi}
+    remote_dir: /projects/standard/mygroup/{{ user }}/runs
+
+  delta:
+    site: ncsa-delta
+    connect:
+      host: login.delta.ncsa.illinois.edu
+      user: ysong29
+    remote_dir: /work/hdd/{{ vars.project_id }}/{{ user }}/runs
+    resources:
+      account: "{{ vars.project_id }}-delta-gpu"
+
+  deltaai:
+    site: ncsa-deltaai
+    connect:
+      host: login.deltaai.ncsa.illinois.edu
+      user: ysong29
+    remote_dir: /work/nvme/{{ vars.project_id }}/{{ user }}/runs
+    resources:
+      account: "{{ vars.project_id }}-dtai-gpu"
+
+defaults:
+  restart:
+    when: [timeout, node_fail, preempted]
+    max_attempts: 40
+
+include: [experiments/*.yaml]

@@ -1,0 +1,20 @@
+# The machine you are sitting at.
+#
+# Useful for developing an experiment file before it costs you queue time:
+# point a cluster at `host: local` with this site, and slurmherd will render
+# and submit through whatever SLURM you have locally.
+name: local
+description: The local machine
+scheduler: slurm
+gpu_flag: gres
+
+resources:
+  nodes: 1
+  ntasks: 1
+
+limits:
+  max_running: 2
+  max_submit_per_pass: 2
+
+notes:
+  - "Requires a working local SLURM installation."

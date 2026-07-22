@@ -1,0 +1,29 @@
+group: demo
+
+experiments:
+  # Runs and exits. Done when it exits 0.
+  - name: hello
+    command: |
+      echo "hello from job $SLURM_JOB_ID on $(hostname)"
+      sleep 3
+
+  # Counts to 20, but we only want it to reach 5. slurmherd reads the progress
+  # from stdout and cancels the job the moment it hits the target.
+  - name: countdown
+    command: |
+      for i in $(seq 1 20); do echo "step: $i"; sleep 1; done
+    progress:
+      kind: log_regex
+      pattern: 'step: (\d+)'
+      source: out
+      target: 5
+      unit: steps
+    completion:
+      when: progress_target
+
+  # A two-axis sweep, from four lines.
+  - name: grid-{{ x }}-{{ y }}
+    matrix:
+      x: [a, b]
+      y: [1, 2]
+    command: "echo cell {{ x }}{{ y }}; sleep 2"

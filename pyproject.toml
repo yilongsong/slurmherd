@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slurmherd"
+version = "0.1.0"
+description = "Declarative job orchestration for SLURM clusters: submit, monitor, and auto-resume long-running jobs from a YAML file."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "slurmherd contributors" }]
+keywords = ["slurm", "hpc", "cluster", "jobs", "orchestration", "experiments"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Distributed Computing",
+]
+dependencies = ["PyYAML>=5.1"]
+
+[project.urls]
+Homepage = "https://github.com/slurmherd/slurmherd"
+Documentation = "https://github.com/slurmherd/slurmherd/tree/main/docs"
+Issues = "https://github.com/slurmherd/slurmherd/issues"
+
+[project.scripts]
+slurmherd = "slurmherd.cli:main"
+herd = "slurmherd.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+slurmherd = ["sites/*.yaml", "templates/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

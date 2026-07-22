@@ -1,0 +1,64 @@
+# The `pour` task: how much data does each policy need?
+#
+# One axis of episodes, one of policy type. Everything else -- resuming, epoch
+# accounting, the 24-hour cap -- is inherited from slurmherd.yaml.
+group: pour
+
+defaults:
+  # Progress is measured in epochs, which LeRobot does not report directly:
+  # epochs = optimizer_step * batch_size / frames_in_dataset. That arithmetic
+  # lives in a script rather than in this file, because it is real logic and it
+  # belongs next to the code it describes.
+  progress:
+    kind: command
+    run: "python {{ remote_dir }}/tools/epochs.py {{ run_dir }}/out {{ dataset }}"
+    target: 1000
+    unit: ep
+  completion:
+    when: progress_target
+
+  resume:
+    when_exists: "{{ run_dir }}/out/checkpoints/last/pretrained_model/model.safetensors"
+    command: >
+      python lerobot/scripts/train.py
+      --resume=true
+      --config_path={{ run_dir }}/out/checkpoints/last/pretrained_model
+      --dataset.repo_id {{ dataset }}
+      --output_dir {{ run_dir }}/out
+      --save_freq 2000
+      --steps 1000000
+
+experiments:
+  # Data-scaling sweep on the full dataset.
+  - name: pour-e{{ episodes }}
+    matrix:
+      episodes: [15, 30, 50, 70, 100]
+    params:
+      dataset: "{{ datasets }}/pour_e100"
+    command: >
+      python lerobot/scripts/train.py
+      --dataset.repo_id {{ dataset }}
+      --dataset.episodes "[0:{{ episodes }}]"
+      --policy.type diffusion
+      --output_dir {{ run_dir }}/out
+      --save_freq 2000
+      --steps 1000000
+
+  # Crowd-sourced variants. Same recipe, different dataset and policy; the
+  # target is higher because these converge more slowly.
+  - name: pour-c{{ episodes }}-k{{ k }}
+    matrix:
+      episodes: [15, 30, 45]
+      k: [1, 2, 5]
+    params:
+      dataset: "{{ datasets }}/pour_c45_k{{ k }}"
+    progress:
+      target: 1500
+    command: >
+      python lerobot/scripts/train.py
+      --dataset.repo_id {{ dataset }}
+      --dataset.episodes "[0:{{ episodes }}]"
+      --policy.type crowd_diffusion
+      --output_dir {{ run_dir }}/out
+      --save_freq 2000
+      --steps 1000000

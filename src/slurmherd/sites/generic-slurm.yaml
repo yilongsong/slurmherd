@@ -1,0 +1,27 @@
+# A deliberately empty starting point for any SLURM cluster.
+#
+# Nothing here assumes anything about queue names, module systems or storage
+# layout, so it never generates a directive your cluster will reject. Fill in
+# partition and account in your slurmherd.yaml, or generate a real profile
+# from the live scheduler with:
+#
+#     slurmherd site detect <cluster> --save
+name: generic-slurm
+description: Plain SLURM with no site-specific assumptions
+scheduler: slurm
+gpu_flag: gres
+account_required: false
+
+resources:
+  nodes: 1
+  ntasks: 1
+
+env:
+  purge_modules: false
+
+limits:
+  max_submit_per_pass: 8
+
+notes:
+  - "Set resources.partition (and resources.account if your cluster requires one)."
+  - "Run `slurmherd site detect <cluster>` to read real partitions and limits off the scheduler."

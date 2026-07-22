@@ -1,0 +1,65 @@
+# A real research workflow: LeRobot policy training on UMN MSI.
+#
+# This is the example slurmherd was designed against. The shape of the problem:
+# a training run needs hundreds of epochs, MSI's GPU queues kill jobs at 24
+# hours, and "done" means an epoch count -- not a process exiting.
+#
+# Every run here survives as many walltimes as it takes, resuming from its last
+# valid checkpoint, and stops itself the moment it hits its target.
+#
+#   slurmherd connect msi
+#   slurmherd doctor
+#   slurmherd up
+#   slurmherd watch
+version: 1
+name: lerobot
+
+vars:
+  # Everything lab-specific in one place, so a new group member changes four lines.
+  group_dir: /projects/standard/ztchen/shared
+  code: "{{ group_dir }}/lerobot_trossen"
+  conda_env: "{{ group_dir }}/conda_envs/lerobot-shared"
+  datasets: "{{ group_dir }}/datasets"
+
+clusters:
+  msi:
+    site: umn-msi
+    connect:
+      host: msi                 # an alias in ~/.ssh/config
+      control_persist: 28800    # keep the Duo-authenticated connection all day
+    remote_dir: "{{ group_dir }}/{{ user }}/slurmherd"
+
+defaults:
+  cluster: msi
+  workdir: "{{ code }}"
+
+  resources:
+    partition: msigpu
+    gpus: "a100:1"
+    cpus_per_task: 8
+    mem: 64G
+    time: "24:00:00"            # the cap; restart.when handles the rest
+
+  env:
+    purge_modules: true
+    modules: [ffmpeg]
+    conda: "{{ conda_env }}"
+    conda_sh: "{{ home }}/miniconda3/etc/profile.d/conda.sh"
+    exports:
+      PYTHONNOUSERSITE: "1"
+    setup: |
+      export PATH="{{ home }}/.local/bin:$PATH"
+      unset LD_PRELOAD
+      export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+  # Cluster problems are worth another 24 hours. A crash in train.py is not:
+  # it would fail identically thirty times and burn the allocation doing it.
+  restart:
+    when: [timeout, node_fail, preempted]
+    max_attempts: 60
+
+limits:
+  max_running: 8                # leave room in the group's fair share
+
+include:
+  - experiments/*.yaml

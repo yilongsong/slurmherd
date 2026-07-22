@@ -1,0 +1,69 @@
+# University of Minnesota -- Minnesota Supercomputing Institute (Agate/Mangi).
+#
+# Partition names and limits change as MSI retires and adds hardware. Treat the
+# table below as a starting point and confirm it against your own account with:
+#
+#     slurmherd doctor
+#     slurmherd site detect msi        # prints what the live scheduler reports
+name: umn-msi
+description: UMN Minnesota Supercomputing Institute
+docs: https://www.msi.umn.edu/content/job-submission-and-scheduling-slurm
+scheduler: slurm
+gpu_flag: gres
+account_required: false
+mail_domain: umn.edu
+
+# MSI group storage is shared, so default to group-readable output.
+umask: "0002"
+
+vars:
+  scratch: /scratch.global/{{ user }}
+
+resources:
+  nodes: 1
+  ntasks: 1
+  partition: msigpu
+  time: "24:00:00"
+
+env:
+  purge_modules: true
+
+limits:
+  max_submit_per_pass: 8
+
+partitions:
+  msismall:
+    max_time: "96:00:00"
+    gpus: false
+    description: CPU jobs on a single node
+  msilarge:
+    max_time: "24:00:00"
+    gpus: false
+    description: Multi-node CPU jobs
+  msibigmem:
+    max_time: "24:00:00"
+    gpus: false
+    description: Large-memory CPU nodes
+  msilong:
+    max_time: "96:00:00"
+    gpus: false
+    description: Long-running CPU jobs
+  msigpu:
+    max_time: "24:00:00"
+    gpus: true
+    description: General GPU queue
+  interactive:
+    max_time: "24:00:00"
+    gpus: false
+    description: Interactive sessions
+  preempt:
+    max_time: "24:00:00"
+    gpus: true
+    description: Preemptible backfill -- add "preempted" to restart.when if you use it
+
+notes:
+  - "Home directories live under /users/<digit>/<username>; the digit varies per user."
+  - "Group storage is /projects/standard/<group>. Global scratch is /scratch.global/<username>."
+  - "Most GPU queues cap walltime at 24 hours -- the reason to use restart.when: [timeout]."
+  - "GPUs are requested as --gres=gpu:<type>:<count>, e.g. gpus: 'a100:1'."
+  - "MSI requires Duo 2FA; run `slurmherd connect msi` once per session."

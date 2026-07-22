@@ -1,0 +1,20 @@
+# The smallest real project. Runs against the bundled fake SLURM with no
+# cluster at all:
+#
+#   export PATH="$(git rev-parse --show-toplevel)/tests/fakeslurm/bin:$PATH"
+#   export FAKESLURM_DIR=/tmp/fakeslurm
+#   slurmherd up && slurmherd status
+version: 1
+name: hello
+
+clusters:
+  here:
+    site: local
+    connect: {host: local}
+    remote_dir: "{{ project_dir }}/work"
+
+defaults:
+  cluster: here
+  resources: {partition: debug, time: "00:05:00"}
+
+include: [experiments/*.yaml]

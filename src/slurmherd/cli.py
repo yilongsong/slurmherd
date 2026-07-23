@@ -209,19 +209,17 @@ def cmd_site(ctx_or_args) -> int:
             ).parent
         except ConfigError:
             pass
+        from .config import read_config_file
+
         catalogue = available_sites(project_dir)
         rows = []
         for name, path in sorted(catalogue.items()):
-            from .config import read_config_file
-
             raw = read_config_file(path)
             rows.append([name, raw.get("description", ""), str(path)])
         print(render_table(["SITE", "DESCRIPTION", "FILE"], rows))
         return 0
 
     if args.site_command == "show":
-        from .config import read_config_file, site_search_dirs
-
         catalogue = available_sites(None)
         if args.name not in catalogue:
             raise UsageError(
@@ -590,44 +588,15 @@ def _mutate(ctx: Context, verb: str, apply) -> int:
 
 
 def cmd_pause(ctx: Context) -> int:
-    def apply(entry, _exp):
-        if entry.paused:
-            return False
-        entry.paused = True
-        if not entry.phase_enum.active:
-            entry.phase = Phase.PAUSED.value
-        entry.note = "paused"
-        return True
-
-    return _mutate(ctx, "paused", apply)
+    return _mutate(ctx, "paused", lambda entry, _exp: entry.set_paused(True))
 
 
 def cmd_resume(ctx: Context) -> int:
-    def apply(entry, _exp):
-        if not entry.paused:
-            return False
-        entry.paused = False
-        if entry.phase_enum is Phase.PAUSED:
-            entry.phase = Phase.IDLE.value
-        entry.note = ""
-        return True
-
-    return _mutate(ctx, "resumed", apply)
+    return _mutate(ctx, "resumed", lambda entry, _exp: entry.set_paused(False))
 
 
 def cmd_retry(ctx: Context) -> int:
-    def apply(entry, _exp):
-        if entry.phase_enum not in (Phase.FAILED, Phase.CANCELLED, Phase.SUCCEEDED):
-            return False
-        entry.attempt_base = len(entry.attempts)
-        entry.phase = Phase.IDLE.value
-        entry.paused = False
-        entry.last_error = ""
-        entry.finished_at = 0.0
-        entry.note = "retry requested"
-        return True
-
-    code = _mutate(ctx, "reset", apply)
+    code = _mutate(ctx, "reset", lambda entry, _exp: entry.reset_for_retry())
     ctx.out("run `slurmherd up` to submit them")
     return code
 

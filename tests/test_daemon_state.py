@@ -6,9 +6,8 @@ import time
 
 import pytest
 
-from conftest import drain
 from slurmherd.daemon import Daemon, systemd_unit
-from slurmherd.state import Attempt, ExperimentState, Phase, State, Store
+from slurmherd.state import Attempt, ExperimentState, Phase, Store
 
 pytestmark = pytest.mark.usefixtures("fake_slurm")
 

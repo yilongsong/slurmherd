@@ -14,7 +14,7 @@ from __future__ import annotations
 import curses
 import threading
 import time
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import List, Optional, Tuple
 
 from .config import Config
 from .display import PHASE_ORDER, progress_cell
@@ -139,20 +139,13 @@ class Dashboard:
         with self.store.transaction() as state:
             entry = state.get(exp.name, exp.cluster)
             if verb == "pause":
-                entry.paused = not entry.paused
-                entry.note = "paused" if entry.paused else ""
-                if entry.paused and not entry.phase_enum.active:
-                    entry.phase = Phase.PAUSED.value
-                elif not entry.paused and entry.phase_enum is Phase.PAUSED:
-                    entry.phase = Phase.IDLE.value
+                entry.set_paused(not entry.paused)
                 self.message = f"{exp.name}: {'paused' if entry.paused else 'resumed'}"
             elif verb == "retry":
-                entry.attempt_base = len(entry.attempts)
-                entry.phase = Phase.IDLE.value
-                entry.paused = False
-                entry.last_error = ""
-                entry.note = "retry requested"
-                self.message = f"{exp.name}: will be resubmitted on the next pass"
+                if entry.reset_for_retry():
+                    self.message = f"{exp.name}: will be resubmitted on the next pass"
+                else:
+                    self.message = f"{exp.name}: nothing to retry (it is {entry.phase})"
         self.state = self.store.load()
 
     def cancel_current(self) -> None:
@@ -253,7 +246,6 @@ def _safe_addstr(win, y: int, x: int, text: str, attr: int = 0) -> None:
 def _draw(win, dash: Dashboard) -> None:
     win.erase()
     height, width = win.getmaxyx()
-    state = dash.state
     rows = dash.rows()
     show_cluster = len(dash.config.clusters) > 1
 

@@ -14,7 +14,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
+from typing import Any, Iterator, Optional, Sequence
 
 from .errors import StateError
 
@@ -71,32 +71,6 @@ def read_json(path: os.PathLike | str, default: Any = None) -> Any:
 
 def write_json(path: os.PathLike | str, obj: Any, mode: Optional[int] = None) -> None:
     atomic_write(path, json.dumps(obj, indent=2, sort_keys=False) + "\n", mode=mode)
-
-
-def read_text_tail(path: os.PathLike | str, max_bytes: int = 262_144) -> str:
-    """Read at most the last ``max_bytes`` of a file. Empty string if unreadable.
-
-    Logs from long jobs get large; never load one whole into memory.
-    """
-    try:
-        size = os.path.getsize(path)
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            if size > max_bytes:
-                fh.seek(size - max_bytes)
-                fh.readline()  # drop the partial first line
-            return fh.read()
-    except OSError:
-        return ""
-
-
-def symlink_force(target: os.PathLike | str, link: os.PathLike | str) -> None:
-    """Create/replace a symlink, ignoring filesystems that do not support them."""
-    link = Path(link)
-    with contextlib.suppress(OSError):
-        if link.is_symlink() or link.exists():
-            link.unlink()
-    with contextlib.suppress(OSError, NotImplementedError):
-        os.symlink(os.fspath(target), link)
 
 
 @contextlib.contextmanager
@@ -366,44 +340,3 @@ def current_user() -> str:
         return getpass.getuser()
     except Exception:  # pragma: no cover
         return "unknown"
-
-
-def deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
-    """Recursively merge ``overlay`` onto ``base``, returning a new dict.
-
-    Dicts merge key-wise. Every other type (including lists) is replaced --
-    list *appending* is opt-in and handled explicitly by the config layer for
-    the few keys where it is the intuitive behaviour.
-    """
-    result = dict(base)
-    for key, value in overlay.items():
-        if isinstance(value, dict) and isinstance(result.get(key), dict):
-            result[key] = deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
-
-
-def flatten(prefix: str, obj: Any, out: Dict[str, Any]) -> Dict[str, Any]:
-    """Flatten nested dicts into dotted keys, for template namespaces."""
-    if isinstance(obj, dict):
-        for key, value in obj.items():
-            flatten(f"{prefix}.{key}" if prefix else str(key), value, out)
-    else:
-        out[prefix] = obj
-    return out
-
-
-def chunked(items: Sequence[Any], size: int) -> Iterator[List[Any]]:
-    for i in range(0, len(items), size):
-        yield list(items[i : i + size])
-
-
-def unique(items: Iterable[Any]) -> List[Any]:
-    seen = set()
-    out = []
-    for item in items:
-        if item not in seen:
-            seen.add(item)
-            out.append(item)
-    return out

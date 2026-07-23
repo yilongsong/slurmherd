@@ -6,7 +6,7 @@ import pytest
 
 from slurmherd import template
 from slurmherd.errors import ConfigError
-from slurmherd.models import Experiment, Progress, Resources, Site, build
+from slurmherd.models import Experiment, Site, build
 from slurmherd.probes import OpBatch, evaluate, plan
 from slurmherd.render import RunPaths, render_script, sbatch_directives
 from slurmherd.scheduler import (

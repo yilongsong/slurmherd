@@ -126,18 +126,41 @@ class ExperimentState:
     def current_attempt(self) -> Optional[Attempt]:
         return self.attempts[-1] if self.attempts else None
 
-    def attempt_by_job(self, job_id: str) -> Optional[Attempt]:
-        for attempt in reversed(self.attempts):
-            if attempt.job_id == job_id:
-                return attempt
-        return None
-
-    def failures(self) -> int:
-        return sum(1 for a in self.attempts if a.outcome and a.outcome != "success")
-
     def budget_used(self) -> int:
         """Attempts counted against ``restart.max_attempts`` right now."""
         return max(0, len(self.attempts) - self.attempt_base)
+
+    # -- steering ---------------------------------------------------------
+    # These are the state transitions the CLI and the dashboard both drive,
+    # kept here so the two front-ends can never disagree about what "pause"
+    # or "retry" mean.
+
+    def set_paused(self, paused: bool) -> bool:
+        """Pause or resume. Returns whether anything changed."""
+        if self.paused == paused:
+            return False
+        self.paused = paused
+        if paused and not self.phase_enum.active:
+            self.phase = Phase.PAUSED.value
+        elif not paused and self.phase_enum is Phase.PAUSED:
+            self.phase = Phase.IDLE.value
+        self.note = "paused" if paused else ""
+        return True
+
+    def reset_for_retry(self) -> bool:
+        """Clear a finished experiment and reset its restart budget.
+
+        Returns whether it was in a state that could be retried.
+        """
+        if self.phase_enum not in (Phase.FAILED, Phase.CANCELLED, Phase.SUCCEEDED):
+            return False
+        self.attempt_base = len(self.attempts)
+        self.phase = Phase.IDLE.value
+        self.paused = False
+        self.last_error = ""
+        self.finished_at = 0.0
+        self.note = "retry requested"
+        return True
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)

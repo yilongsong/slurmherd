@@ -108,7 +108,9 @@ class Dashboard:
 
         def work() -> None:
             try:
-                report = self.engine.reconcile(dry_run=not submit)
+                report = self.engine.reconcile(
+                    dry_run=not submit, persist_observations=not submit
+                )
                 pending = sum(
                     1 for a in report.actions if a.kind.changes_cluster
                 )
@@ -136,6 +138,10 @@ class Dashboard:
         exp = self.current()
         if exp is None:
             return
+        loaded = self.config.clusters[exp.cluster]
+        if exp.owner and exp.owner != loaded.user:
+            self.message = f"{exp.name}: owned by {exp.owner}; connected as {loaded.user}"
+            return
         with self.store.transaction() as state:
             entry = state.get(exp.name, exp.cluster)
             if verb == "pause":
@@ -152,6 +158,10 @@ class Dashboard:
         exp = self.current()
         if exp is None:
             return
+        loaded = self.config.clusters[exp.cluster]
+        if exp.owner and exp.owner != loaded.user:
+            self.message = f"{exp.name}: owned by {exp.owner}; connected as {loaded.user}"
+            return
         entry = self.entry(exp)
         if not entry.job_id:
             self.message = f"{exp.name}: no job to cancel"
@@ -162,9 +172,19 @@ class Dashboard:
         def work() -> None:
             try:
                 transport = self.engine.transport(exp.cluster)
-                transport.batch([self.engine.scheduler.cancel_op(job_id)])
+                results = transport.batch([self.engine.scheduler.cancel_op(job_id)])
+                result = results[0] if results else {}
+                if result.get("rc") not in (0, None):
+                    detail = (result.get("err") or result.get("error") or "unknown error").strip()
+                    raise RuntimeError(f"scancel {job_id} failed: {detail}")
                 with self.store.transaction() as state:
                     st = state.get(exp.name, exp.cluster)
+                    if st.job_id != job_id:
+                        self.message = (
+                            f"{exp.name}: cancelled stale job {job_id}; "
+                            f"state now tracks {st.job_id or 'none'}"
+                        )
+                        return
                     st.job_id = ""
                     st.phase = Phase.CANCELLED.value
                     st.paused = True

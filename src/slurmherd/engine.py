@@ -26,10 +26,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from .config import ClusterFacts, Config, LoadedCluster
+from .config import ClusterFacts, Config, LoadedCluster, load as load_config
 from .models import Experiment, Limits, as_dict, build
 from .probes import OpBatch, ProbeSlots, Reading, evaluate, plan as plan_probes
-from .render import RunPaths, render_script, runtime_namespace
+from .render import RunPaths, job_marker, render_script, runtime_namespace
 from .scheduler import (
     AcctRecord,
     Classification,
@@ -45,6 +45,7 @@ from .transport import Transport, TransportError, make_transport
 from .util import now
 
 DEFAULT_MAX_SUBMIT_PER_PASS = 8
+ACCOUNTING_GRACE_SECONDS = 60
 
 
 class ActionKind(str, Enum):
@@ -74,6 +75,8 @@ class Action:
     cluster: str
     detail: str = ""
     job_id: str = ""
+    final_phase: str = ""
+    final_outcome: str = ""
 
     def __str__(self) -> str:
         target = f"{self.experiment}"
@@ -171,6 +174,19 @@ class Engine:
         )
         loaded.facts = facts
         self.store.record_facts(cluster, facts.to_dict())
+
+        # Facts affect owners and every path containing ``~`` or ``{{ user }}``.
+        # Re-resolve the whole config immediately so the first command after
+        # connecting cannot submit with local placeholder values.
+        cached = {
+            name: item.facts for name, item in self.config.clusters.items()
+        }
+        cached[cluster] = facts
+        refreshed = load_config(self.config.file, facts=cached)
+        self.config.project = refreshed.project
+        self.config.clusters = refreshed.clusters
+        self.config.experiments = refreshed.experiments
+        self.config.warnings = refreshed.warnings
         return facts
 
     # -- gather ----------------------------------------------------------
@@ -234,8 +250,6 @@ class Engine:
     ) -> List[Action]:
         """Decide what to do. Mutates ``state`` to reflect observations only."""
         actions: List[Action] = []
-        submitted_this_pass: Dict[str, int] = {}
-
         for cluster, group in self.config.by_cluster(experiments).items():
             snapshot = snapshots.get(cluster)
             if snapshot is None or not snapshot.reachable:
@@ -247,7 +261,6 @@ class Engine:
                     actions.append(action)
                     if action.kind in (ActionKind.SUBMIT, ActionKind.RESUME):
                         budget.spend(exp)
-                        submitted_this_pass[cluster] = submitted_this_pass.get(cluster, 0) + 1
         return actions
 
     # -- the decision for one experiment ---------------------------------
@@ -308,7 +321,7 @@ class Engine:
                     ActionKind.ADOPT,
                     exp.name,
                     exp.cluster,
-                    f"job {orphan.job_id} matches by name",
+                    f"job {orphan.job_id} matches name and project marker",
                     orphan.job_id,
                 )
 
@@ -316,16 +329,15 @@ class Engine:
         if reading.complete:
             entry.progress = self._progress_state(exp, reading)
             if live is not None and exp.completion.stop_when_reached:
-                self._finish(entry, Outcome.SUCCESS, reading.complete_reason)
-                entry.phase = Phase.SUCCEEDED.value
-                entry.note = reading.complete_reason
-                entry.finished_at = now()
+                self._observe(entry, live, reading, exp)
                 return Action(
                     ActionKind.CANCEL,
                     exp.name,
                     exp.cluster,
                     f"complete: {reading.complete_reason}",
                     live.job_id,
+                    final_phase=Phase.SUCCEEDED.value,
+                    final_outcome=Outcome.SUCCESS.value,
                 )
             if entry.phase != Phase.SUCCEEDED.value:
                 entry.phase = Phase.SUCCEEDED.value
@@ -339,10 +351,15 @@ class Engine:
 
         if not exp.enabled:
             if live is not None:
-                entry.phase = Phase.CANCELLED.value
-                entry.note = "disabled in config"
+                self._observe(entry, live, reading, exp)
                 return Action(
-                    ActionKind.CANCEL, exp.name, exp.cluster, "disabled in config", live.job_id
+                    ActionKind.CANCEL,
+                    exp.name,
+                    exp.cluster,
+                    "disabled in config",
+                    live.job_id,
+                    final_phase=Phase.CANCELLED.value,
+                    final_outcome=Outcome.CANCELLED.value,
                 )
             entry.phase = Phase.CANCELLED.value
             entry.note = "disabled in config"
@@ -357,15 +374,26 @@ class Engine:
 
         # Still on the cluster: just record what it is doing.
         if live is not None:
+            entry.missing_since = 0.0
             self._observe(entry, live, reading, exp)
             return None
 
-        # The job left the queue. Work out why, once.
+        # The job left the queue. Work out why, once. Accounting commonly
+        # trails squeue, so an evidence-free disappearance gets a short grace
+        # period instead of being declared a failure immediately.
         attempt = entry.current_attempt()
         if attempt is not None and attempt.job_id and not attempt.finished:
             verdict = classify(
                 reading.exit_code, snapshot.acct.get(attempt.job_id), reading.log_tail
             )
+            if verdict.outcome is Outcome.UNKNOWN:
+                current = now()
+                if not entry.missing_since:
+                    entry.missing_since = current
+                if current - entry.missing_since < ACCOUNTING_GRACE_SECONDS:
+                    entry.note = "job left the queue; waiting for accounting"
+                    return Action(ActionKind.WAIT, exp.name, exp.cluster, entry.note)
+            entry.missing_since = 0.0
             attempt.outcome = verdict.outcome.value
             attempt.detail = f"{verdict.detail} [{verdict.source}]"
             attempt.ended_at = now()
@@ -441,6 +469,18 @@ class Engine:
         state: State,
     ) -> Optional[Action]:
         """Submit, or explain why not."""
+        if entry.budget_used() >= exp.restart.max_attempts:
+            entry.phase = Phase.FAILED.value
+            entry.note = f"gave up after {entry.budget_used()} attempts"
+            entry.finished_at = now()
+            return Action(
+                ActionKind.FAIL,
+                exp.name,
+                exp.cluster,
+                f"reached restart.max_attempts ({exp.restart.max_attempts}); "
+                f"`slurmherd retry {exp.name}` resets the budget",
+            )
+
         blocked = [
             dep
             for dep in exp.depends_on
@@ -467,7 +507,7 @@ class Engine:
 
         resume = bool(entry.attempts) and reading.resumable
         kind = ActionKind.RESUME if resume else ActionKind.SUBMIT
-        detail = "resuming from checkpoint" if resume else f"attempt {len(entry.attempts) + 1}"
+        detail = "resuming from checkpoint" if resume else f"attempt {entry.attempt + 1}"
         return Action(kind, exp.name, exp.cluster, detail)
 
     # -- observation helpers ---------------------------------------------
@@ -486,8 +526,14 @@ class Engine:
         self, exp: Experiment, snapshot: ClusterSnapshot, state: State
     ) -> Optional[QueueEntry]:
         claimed = {e.job_id for e in state.experiments.values() if e.job_id}
+        marker = job_marker(self.config.project.name, exp)
         for entry in snapshot.queue.values():
-            if entry.name == exp.name and entry.job_id not in claimed and entry.state.active:
+            if (
+                entry.name == exp.name
+                and entry.comment == marker
+                and entry.job_id not in claimed
+                and entry.state.active
+            ):
                 return entry
         return None
 
@@ -560,13 +606,13 @@ class Engine:
 
             exp = self.config.experiment(action.experiment)
             entry = state.get(exp.name, cluster)
-            attempt_number = len(entry.attempts) + 1
+            attempt_number = entry.attempt + 1
             paths = RunPaths(run_dir=exp.run_dir, attempt=attempt_number)
             resume = action.kind is ActionKind.RESUME
             script = self._build_script(exp, loaded, paths, resume)
 
             batch.add({"op": "mkdir", "path": paths.run_dir})
-            batch.add({"op": "write", "path": paths.script, "text": script, "mode": 0o755})
+            batch.add({"op": "write", "path": paths.script, "text": script, "mode": 0o700})
             index = batch.add(self.scheduler.submit_op(paths.script, cwd=paths.run_dir))
             submissions.append((action, entry, paths, index, resume))
 
@@ -584,6 +630,16 @@ class Engine:
                 entry = state.get(action.experiment, cluster)
                 entry.job_id = ""
                 entry.job_state = ""
+                if action.final_phase:
+                    entry.phase = action.final_phase
+                    entry.note = action.detail.removeprefix("complete: ")
+                    entry.finished_at = now()
+                    outcome = (
+                        Outcome(action.final_outcome)
+                        if action.final_outcome
+                        else Outcome.CANCELLED
+                    )
+                    self._finish(entry, outcome, entry.note)
 
         for action, entry, paths, index, resume in submissions:
             result = results[index] if index < len(results) else {}
@@ -663,10 +719,14 @@ class Engine:
     # -- the public entry point ------------------------------------------
 
     def reconcile(
-        self, experiments: Optional[Sequence[Experiment]] = None, dry_run: bool = False
+        self,
+        experiments: Optional[Sequence[Experiment]] = None,
+        dry_run: bool = False,
+        persist_observations: bool = False,
     ) -> PassReport:
-        """Run one full pass: gather, decide, act, persist."""
+        """Run one pass, optionally persisting observations during a dry run."""
         selected = list(experiments if experiments is not None else self.config.experiments)
+        selected_names = [exp.name for exp in selected]
         report = PassReport(dry_run=dry_run)
 
         clusters = sorted({exp.cluster for exp in selected})
@@ -680,7 +740,10 @@ class Engine:
                 report.snapshots[cluster] = ClusterSnapshot(cluster=cluster, error=str(exc))
                 report.errors.append(str(exc))
 
-        with self.store.transaction() as state:
+        # Fact discovery may have re-resolved paths and owners.
+        selected = [self.config.experiment(name) for name in selected_names]
+
+        with self.store.transaction(save=not dry_run or persist_observations) as state:
             for cluster in clusters:
                 if cluster in report.snapshots:
                     continue

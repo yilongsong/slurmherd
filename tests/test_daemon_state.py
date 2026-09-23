@@ -148,4 +148,47 @@ def test_systemd_unit_is_plausible(local_project):
     unit = systemd_unit(config, interval=120)
     assert "ExecStart=" in unit
     assert "daemon run --interval 120" in unit
-    assert "Restart=always" in unit
+    assert "Restart=on-failure" in unit
+
+
+def test_corrupt_state_is_reported(tmp_path):
+    from slurmherd.errors import StateError
+
+    store = Store(tmp_path)
+    store.dir.mkdir(parents=True, exist_ok=True)
+    store.path.write_text("{definitely not json")
+    with pytest.raises(StateError, match="cannot read state file"):
+        store.load()
+
+
+def test_trimmed_history_keeps_absolute_attempt_budget(tmp_path):
+    from slurmherd.state import MAX_HISTORY
+
+    store = Store(tmp_path)
+    with store.transaction() as state:
+        entry = state.get("x", "here")
+        entry.attempt = 60
+        entry.attempts = [Attempt(number=i) for i in range(1, 61)]
+    entry = store.load().experiments["x"]
+    assert len(entry.attempts) == MAX_HISTORY
+    assert entry.budget_used() == 60
+    entry.phase = Phase.FAILED.value
+    assert entry.reset_for_retry()
+    assert entry.budget_used() == 0
+
+
+def test_daemon_reloads_changed_experiment_file(local_project):
+    config, store, engine = local_project(
+        """
+        experiments:
+          - name: quick
+            command: echo before
+        """
+    )
+    daemon = Daemon(config, engine, echo=lambda _m: None)
+    source = config.experiment("quick").source_file
+    from pathlib import Path
+
+    Path(source).write_text("experiments:\n  - name: quick\n    command: echo after\n")
+    assert daemon._reload_config()
+    assert config.experiment("quick").command == "echo after"

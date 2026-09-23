@@ -266,6 +266,7 @@ def cmd_squeue(argv: List[str]) -> int:
                     job["partition"],
                     reason,
                     job.get("node", ""),
+                    job.get("directives", {}).get("comment", ""),
                 ]
             )
         )
@@ -310,6 +311,9 @@ def cmd_sacct(argv: List[str]) -> int:
 
 
 def cmd_scancel(argv: List[str]) -> int:
+    if os.environ.get("FAKESLURM_CANCEL_REJECT"):
+        print(f"scancel: error: {os.environ['FAKESLURM_CANCEL_REJECT']}", file=sys.stderr)
+        return 1
     data = refresh(load())
     for arg in argv:
         if arg.isdigit():
@@ -323,7 +327,8 @@ def cmd_scancel(argv: List[str]) -> int:
 def cmd_sinfo(_argv: List[str]) -> int:
     for name, info in PARTITIONS.items():
         gres = "gpu:a100:4" if info["gpus"] else "(null)"
-        print("|".join([name, info["max_time"], gres, str(info["nodes"]), "up"]))
+        label = name + ("*" if name == "batch" else "")
+        print("|".join([label, info["max_time"], gres, str(info["nodes"]), "up"]))
     return 0
 
 

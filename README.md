@@ -274,7 +274,8 @@ cluster, group, or tag. Run `slurmherd <command> --help` for details.
 - Only timeouts, node failures, and preemption are retried by default. Program errors
   stop for inspection.
 - Submission limits prevent a large matrix from flooding a shared queue.
-- SlurmHerd only cancels jobs it tracks or safely re-adopts by exact name.
+- SlurmHerd only cancels jobs it tracks or safely re-adopts by a project-specific
+  scheduler marker.
 - `show --script` makes the generated shell script inspectable.
 
 ## Know before you run

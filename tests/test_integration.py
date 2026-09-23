@@ -317,3 +317,130 @@ def test_the_job_script_sets_up_the_declared_environment(local_project):
         """
     )
     wait_for(engine, store, "envcheck", Phase.SUCCEEDED)
+
+
+def test_dry_run_and_failed_cancel_do_not_finalize_completion(local_project, monkeypatch):
+    config, store, engine = local_project(
+        """
+        experiments:
+          - name: counter-dry
+            command: |
+              echo "step: 1"
+              sleep 20
+            progress:
+              kind: log_regex
+              pattern: 'step: (\\d+)'
+              source: out
+              target: 1
+            completion: {when: progress_target}
+        """
+    )
+    engine.reconcile()
+    for _ in range(20):
+        report = engine.reconcile(dry_run=True)
+        if report.of_kind(ActionKind.CANCEL):
+            break
+        time.sleep(0.2)
+    else:
+        pytest.fail("dry run never observed completion")
+
+    before = store.load().experiments["counter-dry"]
+    assert before.phase_enum in (Phase.QUEUED, Phase.RUNNING)
+    assert before.job_id
+    assert before.current_attempt().outcome is None
+
+    monkeypatch.setenv("FAKESLURM_CANCEL_REJECT", "permission denied")
+    failed = engine.reconcile()
+    assert failed.errors
+    unchanged = store.load().experiments["counter-dry"]
+    assert unchanged.phase_enum in (Phase.QUEUED, Phase.RUNNING)
+    assert unchanged.job_id
+    assert unchanged.current_attempt().outcome is None
+
+    monkeypatch.delenv("FAKESLURM_CANCEL_REJECT")
+    engine.reconcile()
+    assert store.load().experiments["counter-dry"].phase_enum is Phase.SUCCEEDED
+
+
+def test_clean_exit_before_completion_still_respects_attempt_limit(local_project):
+    config, store, engine = local_project(
+        """
+        experiments:
+          - name: bounded
+            command: "true"
+            completion: {when: never}
+            restart: {when: [always], max_attempts: 1}
+        """
+    )
+    entry = wait_for(engine, store, "bounded", Phase.FAILED)
+    assert entry.attempt == 1
+    assert "max_attempts" in entry.note or "gave up" in entry.note
+
+
+def test_job_scripts_are_private(local_project):
+    config, store, engine = local_project(
+        """
+        experiments:
+          - name: private-script
+            command: "sleep 2"
+        """
+    )
+    engine.reconcile()
+    entry = store.load().experiments["private-script"]
+    import os
+
+    mode = os.stat(entry.current_attempt().script).st_mode & 0o777
+    assert mode == 0o700
+
+
+def test_same_named_unmarked_job_is_not_adopted(local_project, tmp_path, monkeypatch):
+    import subprocess
+
+    config, store, engine = local_project(
+        """
+        experiments:
+          - name: collision
+            command: "sleep 2"
+        """
+    )
+    foreign = tmp_path / "foreign.sbatch"
+    foreign.write_text("#!/bin/bash\n#SBATCH --job-name=collision\nsleep 2\n")
+    monkeypatch.setenv("FAKESLURM_PENDING", "100")
+    subprocess.run(["sbatch", "--parsable", str(foreign)], check=True, capture_output=True)
+    report = engine.reconcile()
+    assert not report.of_kind(ActionKind.ADOPT)
+    assert report.of_kind(ActionKind.SUBMIT)
+
+
+def test_missing_job_waits_for_accounting_before_failing(local_project):
+    from slurmherd.engine import ACCOUNTING_GRACE_SECONDS, ClusterSnapshot
+    from slurmherd.probes import Reading
+    from slurmherd.state import Attempt, State
+
+    config, _store, engine = local_project(
+        """
+        experiments:
+          - name: accounting-lag
+            command: "echo hi"
+        """
+    )
+    exp = config.experiment("accounting-lag")
+    state = State()
+    entry = state.get(exp.name, exp.cluster)
+    entry.phase = Phase.RUNNING.value
+    entry.job_id = "42"
+    entry.attempt = 1
+    entry.attempts.append(Attempt(number=1, job_id="42"))
+    snapshot = ClusterSnapshot(
+        cluster=exp.cluster, readings={exp.name: Reading()}
+    )
+
+    actions = engine.plan([exp], {exp.cluster: snapshot}, state)
+    assert actions[0].kind is ActionKind.WAIT
+    assert "waiting for accounting" in actions[0].detail
+    assert not entry.current_attempt().finished
+
+    entry.missing_since = time.time() - ACCOUNTING_GRACE_SECONDS - 1
+    actions = engine.plan([exp], {exp.cluster: snapshot}, state)
+    assert actions[0].kind is ActionKind.FAIL
+    assert entry.current_attempt().outcome == "unknown"

@@ -29,7 +29,7 @@ from .engine import ActionKind, Engine, PassReport
 from .errors import ConfigError, SlurmherdError, UsageError
 from .models import Experiment, as_dict
 from .render import RunPaths
-from .scaffold import write_scaffold
+from .scaffold import cluster_name_for, write_scaffold
 from .state import Phase, Store
 from .transport import AuthRequired, SSHTransport, TransportError
 from .util import color_enabled, format_age, iso, paint, render_table
@@ -48,13 +48,15 @@ class Context:
         self.color = color_enabled() and not getattr(args, "no_color", False)
         directory = Path(args.directory).resolve() if args.directory else None
         self.project_file = find_project_file(directory)
-        self.store = Store(self._state_dir_hint())
+        preliminary = load(self.project_file)
+        self.store = Store(preliminary.state_dir)
         facts = {
             name: ClusterFacts.from_dict(data)
             for name, data in self.store.facts().items()
         }
-        self.config: Config = load(self.project_file, facts={k: v for k, v in facts.items() if v})
-        # The real state dir may differ from the hint if paths.state_dir is set.
+        self.config = load(
+            self.project_file, facts={k: v for k, v in facts.items() if v}
+        )
         self.store = Store(self.config.state_dir)
         self.engine = Engine(self.config, self.store, log=self.info)
 
@@ -113,7 +115,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(
         "\nnext:\n"
         f"  1. edit {paint('slurmherd.yaml', 'bold', enabled=color)} -- set the cluster host and account\n"
-        f"  2. {paint('slurmherd connect ' + (args.host or '<cluster>'), 'bold', enabled=color)}"
+        f"  2. {paint('slurmherd connect ' + cluster_name_for(args.host, args.site), 'bold', enabled=color)}"
         "   log in once (2FA happens here)\n"
         f"  3. {paint('slurmherd doctor', 'bold', enabled=color)}"
         "                check the config against the live cluster\n"
@@ -135,23 +137,32 @@ def cmd_connect(ctx: Context) -> int:
         if not isinstance(transport, SSHTransport):
             ctx.out(f"{name}: local, nothing to connect")
             continue
-        if transport.is_connected():
+        already = transport.is_connected()
+        if already:
             ctx.out(paint(f"{name}: already connected", "green", enabled=ctx.color))
-            continue
-        ctx.out(f"{name}: opening a shared connection to {transport.location} …")
-        ctx.out(paint("  (approve any 2FA prompt now -- this happens once)", "grey", enabled=ctx.color))
-        try:
-            ok = transport.connect(interactive=True)
-        except TransportError as exc:
-            ctx.error(str(exc))
-            failures += 1
-            continue
-        if ok and transport.is_connected():
-            ctx.out(paint(f"{name}: connected", "green", enabled=ctx.color))
+            ok = True
+        else:
+            sharing = bool(ctx.config.clusters[name].spec.connect.control_persist)
+            label = "opening a shared connection" if sharing else "checking non-interactive SSH"
+            ctx.out(f"{name}: {label} to {transport.location} …")
+            if sharing:
+                ctx.out(paint("  (approve any 2FA prompt now)", "grey", enabled=ctx.color))
+            try:
+                ok = transport.connect(interactive=True)
+            except TransportError as exc:
+                ctx.error(str(exc))
+                failures += 1
+                continue
+        if ok:
             try:
                 ctx.engine.resolve_facts(name)
             except TransportError as exc:
-                ctx.warn(str(exc))
+                ctx.error(str(exc))
+                failures += 1
+                continue
+            suffix = " (connection sharing disabled)" if not transport.control_path else ""
+            if not already:
+                ctx.out(paint(f"{name}: connected{suffix}", "green", enabled=ctx.color))
         else:
             ctx.error(f"{name}: could not open a connection")
             failures += 1
@@ -160,6 +171,8 @@ def cmd_connect(ctx: Context) -> int:
 
 def cmd_disconnect(ctx: Context) -> int:
     for name in ctx.args.clusters or list(ctx.config.clusters):
+        if name not in ctx.config.clusters:
+            raise UsageError(f"unknown cluster {name!r}")
         transport = ctx.engine.transport(name)
         if isinstance(transport, SSHTransport) and transport.disconnect():
             ctx.out(f"{name}: disconnected")
@@ -220,7 +233,14 @@ def cmd_site(ctx_or_args) -> int:
         return 0
 
     if args.site_command == "show":
-        catalogue = available_sites(None)
+        project_dir = None
+        try:
+            project_dir = find_project_file(
+                Path(args.directory).resolve() if args.directory else None
+            ).parent
+        except ConfigError:
+            pass
+        catalogue = available_sites(project_dir)
         if args.name not in catalogue:
             raise UsageError(
                 f"unknown site {args.name!r}. Available: " + ", ".join(sorted(catalogue))
@@ -232,6 +252,8 @@ def cmd_site(ctx_or_args) -> int:
     ctx = ctx_or_args if isinstance(ctx_or_args, Context) else Context(args)
     from .doctor import detect_site
 
+    if args.cluster not in ctx.config.clusters:
+        raise UsageError(f"unknown cluster {args.cluster!r}")
     text = detect_site(ctx.engine, args.cluster, name=args.name)
     if args.save:
         target = ctx.config.root / "sites" / f"{args.name or args.cluster}.yaml"
@@ -361,6 +383,8 @@ def cmd_push(ctx: Context) -> int:
     targets = ctx.args.clusters or sync.clusters or list(ctx.config.clusters)
     failures = 0
     for name in targets:
+        if name not in ctx.config.clusters:
+            raise UsageError(f"unknown cluster {name!r}")
         loaded = ctx.config.clusters[name]
         dest = sync.dest or f"{loaded.remote_dir}/code"
         source = str((ctx.config.root / sync.source).resolve())
@@ -386,7 +410,9 @@ def cmd_push(ctx: Context) -> int:
 def cmd_status(ctx: Context) -> int:
     selected = ctx.selection()
     if not ctx.args.cached:
-        report = ctx.engine.reconcile(selected, dry_run=True)
+        report = ctx.engine.reconcile(
+            selected, dry_run=True, persist_observations=True
+        )
         for error in report.errors:
             ctx.warn(error)
     state = ctx.store.load()
@@ -483,10 +509,17 @@ def cmd_show(ctx: Context) -> int:
     color = ctx.color
 
     if ctx.args.script:
+        ctx.engine.resolve_facts(exp.cluster)
+        exp = ctx.config.experiment(exp.name)
         loaded = ctx.config.clusters[exp.cluster]
-        attempt = ctx.args.attempt or max(1, entry.attempt)
+        attempt = ctx.args.attempt or max(1, entry.attempt + 1)
+        resume = False
+        if entry.attempts and exp.resume.command:
+            snapshot = ctx.engine.gather(exp.cluster, [exp], state)
+            if snapshot.error:
+                raise UsageError(snapshot.error)
+            resume = snapshot.readings.get(exp.name).resumable
         paths = RunPaths(run_dir=exp.run_dir, attempt=attempt)
-        resume = bool(entry.attempts) and bool(exp.resume.command)
         ctx.out(ctx.engine._build_script(exp, loaded, paths, resume))
         return 0
 
@@ -530,7 +563,7 @@ def cmd_show(ctx: Context) -> int:
         field(
             "attempts",
             f"{entry.budget_used()} of {exp.restart.max_attempts}"
-            + (f" ({len(entry.attempts)} total)" if entry.attempt_base else ""),
+            + (f" ({entry.attempt} total)" if entry.attempt_base else ""),
         )
     )
     ctx.out("")
@@ -572,11 +605,27 @@ def cmd_show(ctx: Context) -> int:
 # --------------------------------------------------------------------------
 
 
+def _require_owned(ctx: Context, experiments: Sequence[Experiment]) -> None:
+    """Refuse manual mutations of experiments owned by another cluster user."""
+    for cluster in sorted({exp.cluster for exp in experiments}):
+        if not ctx.config.clusters[cluster].facts.resolved:
+            ctx.engine.resolve_facts(cluster)
+    for original in experiments:
+        exp = ctx.config.experiment(original.name)
+        user = ctx.config.clusters[exp.cluster].user
+        if exp.owner and exp.owner != user:
+            raise UsageError(
+                f"{exp.name!r} is owned by {exp.owner!r}; connected as {user!r}"
+            )
+
+
 def _mutate(ctx: Context, verb: str, apply) -> int:
     selected = ctx.selection()
     if not selected:
         ctx.out("nothing selected")
         return 0
+    _require_owned(ctx, selected)
+    selected = [ctx.config.experiment(exp.name) for exp in selected]
     touched = []
     with ctx.store.transaction() as state:
         for exp in selected:
@@ -603,6 +652,8 @@ def cmd_retry(ctx: Context) -> int:
 
 def cmd_cancel(ctx: Context) -> int:
     selected = ctx.selection()
+    _require_owned(ctx, selected)
+    selected = [ctx.config.experiment(exp.name) for exp in selected]
     state = ctx.store.load()
     victims: List[Tuple[Experiment, str]] = []
     for exp in selected:
@@ -644,6 +695,12 @@ def cmd_cancel(ctx: Context) -> int:
                     failures += 1
                     continue
                 entry = state.get(exp.name, cluster)
+                if entry.job_id != job_id:
+                    ctx.warn(
+                        f"{exp.name}: state now tracks job {entry.job_id or 'none'}; "
+                        f"left it unchanged after cancelling stale job {job_id}"
+                    )
+                    continue
                 entry.job_id = ""
                 entry.phase = Phase.CANCELLED.value
                 # Cancelling also pauses: otherwise the very next `up` would
@@ -665,7 +722,11 @@ def cmd_down(ctx: Context) -> int:
 
 def cmd_clean(ctx: Context) -> int:
     keep = ctx.args.keep
+    if keep < 1:
+        raise UsageError("--keep must be at least 1")
     selected = ctx.selection()
+    _require_owned(ctx, selected)
+    selected = [ctx.config.experiment(exp.name) for exp in selected]
     state = ctx.store.load()
     removed = 0
     for cluster, group in ctx.config.by_cluster(selected).items():
@@ -712,7 +773,7 @@ def build_parser() -> argparse.ArgumentParser:
   slurmherd logs my-run -f                     follow a job's stderr
   slurmherd daemon run                         keep everything alive
 
-docs: https://github.com/slurmherd/slurmherd/tree/main/docs
+docs: https://github.com/yilongsong/slurmherd/tree/main/docs
 """,
     )
     parser.add_argument("--version", action="version", version=f"slurmherd {__version__}")

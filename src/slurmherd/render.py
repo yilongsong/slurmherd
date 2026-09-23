@@ -18,6 +18,7 @@ Structure, always in this order:
 
 from __future__ import annotations
 
+import hashlib
 import shlex
 from dataclasses import dataclass
 from typing import List, Optional
@@ -72,6 +73,13 @@ class RunPaths:
         return f"{self.run_dir}/latest.err"
 
 
+def job_marker(project: str, experiment: Experiment) -> str:
+    """Stable scheduler comment used to identify jobs this project created."""
+    identity = "\0".join((project, experiment.name, experiment.run_dir))
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return f"slurmherd:{digest}"
+
+
 def runtime_namespace(paths: RunPaths) -> dict:
     """Values only known once an attempt number exists."""
     return {
@@ -92,6 +100,7 @@ def sbatch_directives(
     site: Site,
     paths: RunPaths,
     resources: Optional[Resources] = None,
+    project: str = "",
 ) -> List[str]:
     """Render the ``#SBATCH`` block. Unset fields are simply omitted."""
     res = resources if resources is not None else experiment.resources
@@ -100,6 +109,8 @@ def sbatch_directives(
         f"#SBATCH --output={paths.out}",
         f"#SBATCH --error={paths.err}",
     ]
+    if project:
+        lines.append(f"#SBATCH --comment={job_marker(project, experiment)}")
 
     def add(flag: str, value) -> None:
         if value is not None and value != "":
@@ -220,7 +231,7 @@ def render_script(
     """Produce the complete job script for one attempt."""
     res = resources if resources is not None else experiment.resources
     out: List[str] = [f"#!{site.shell}"]
-    out += sbatch_directives(experiment, site, paths, res)
+    out += sbatch_directives(experiment, site, paths, res, project=project)
     out += [
         "",
         MARKER,

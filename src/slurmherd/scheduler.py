@@ -140,6 +140,7 @@ class QueueEntry:
     partition: str = ""
     reason: str = ""
     nodes: str = ""
+    comment: str = ""
 
 
 @dataclass
@@ -178,7 +179,7 @@ class SlurmScheduler:
     # -- queue -----------------------------------------------------------
 
     def queue_op(self, user: str) -> Dict[str, Any]:
-        fmt = SEP.join(["%i", "%j", "%T", "%M", "%L", "%P", "%R", "%N"])
+        fmt = SEP.join(["%i", "%j", "%T", "%M", "%L", "%P", "%R", "%N", "%k"])
         return {
             "op": "run",
             "cmd": f"squeue --noheader --user={shlex.quote(user)} --format={shlex.quote(fmt)}",
@@ -198,7 +199,7 @@ class SlurmScheduler:
             parts = line.split(SEP)
             if len(parts) < 3:
                 continue
-            parts += [""] * (8 - len(parts))
+            parts += [""] * (9 - len(parts))
             entries[parts[0]] = QueueEntry(
                 job_id=parts[0],
                 name=parts[1],
@@ -208,6 +209,7 @@ class SlurmScheduler:
                 partition=parts[5],
                 reason=parts[6].strip("()"),
                 nodes=parts[7],
+                comment=parts[8],
             )
         return entries
 
@@ -321,9 +323,14 @@ class SlurmScheduler:
             parts = [p.strip() for p in line.strip().split(SEP)]
             if len(parts) < 2 or not parts[0]:
                 continue
+            is_default = parts[0].endswith("*")
             name = parts[0].rstrip("*")
             gres = parts[2] if len(parts) > 2 else ""
-            info = partitions.setdefault(name, {"max_time": parts[1], "gpus": False, "nodes": 0})
+            info = partitions.setdefault(
+                name,
+                {"max_time": parts[1], "gpus": False, "nodes": 0, "default": is_default},
+            )
+            info["default"] = info["default"] or is_default
             if gres and gres not in ("(null)", "null"):
                 info["gpus"] = True
             try:

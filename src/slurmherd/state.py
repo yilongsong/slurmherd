@@ -6,19 +6,21 @@ design stays comprehensible as a project grows.
 
 State lives in one JSON file under ``.slurmherd/``, written atomically under an
 advisory lock so the daemon, a ``status`` call and the dashboard can all touch
-it at once. It is disposable: delete it and slurmherd re-adopts running jobs by
-name on the next pass.
+it at once. If it is lost, slurmherd can safely re-adopt marked running jobs, but
+attempt history and restart budgets are not recoverable.
 """
 
 from __future__ import annotations
 
 import contextlib
+import json
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
-from .util import atomic_write, ensure_dir, file_lock, now, read_json
+from .errors import StateError
+from .util import atomic_write, ensure_dir, file_lock, now
 
 STATE_VERSION = 1
 MAX_HISTORY = 40
@@ -115,6 +117,8 @@ class ExperimentState:
     """Hash of the resolved experiment, so config edits can be detected."""
     adopted: bool = False
     """True when the running job was matched by name rather than submitted by us."""
+    missing_since: float = 0.0
+    """When a tracked job first disappeared before accounting caught up."""
 
     @property
     def phase_enum(self) -> Phase:
@@ -128,7 +132,8 @@ class ExperimentState:
 
     def budget_used(self) -> int:
         """Attempts counted against ``restart.max_attempts`` right now."""
-        return max(0, len(self.attempts) - self.attempt_base)
+        absolute = max(self.attempt, self.attempts[-1].number if self.attempts else 0)
+        return max(0, absolute - self.attempt_base)
 
     # -- steering ---------------------------------------------------------
     # These are the state transitions the CLI and the dashboard both drive,
@@ -154,7 +159,9 @@ class ExperimentState:
         """
         if self.phase_enum not in (Phase.FAILED, Phase.CANCELLED, Phase.SUCCEEDED):
             return False
-        self.attempt_base = len(self.attempts)
+        self.attempt_base = max(
+            self.attempt, self.attempts[-1].number if self.attempts else 0
+        )
         self.phase = Phase.IDLE.value
         self.paused = False
         self.last_error = ""
@@ -246,18 +253,30 @@ class Store:
         self.lock_path = self.dir / self.LOCKNAME
 
     def load(self) -> State:
-        raw = read_json(self.path, default=None)
-        if raw is None:
+        if not self.path.exists():
             return State()
-        version = int(raw.get("version", STATE_VERSION))
-        if version > STATE_VERSION:
-            from .errors import StateError
-
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except (OSError, ValueError) as exc:
             raise StateError(
-                f"{self.path} was written by a newer slurmherd (state version {version}); "
-                "upgrade slurmherd or move that file aside."
-            )
-        return State.from_dict(raw)
+                f"cannot read state file {self.path}: {exc}; move it aside only "
+                "if you intend slurmherd to rebuild state"
+            ) from exc
+        if not isinstance(raw, dict):
+            raise StateError(f"state file {self.path} must contain a JSON object")
+        try:
+            version = int(raw.get("version", STATE_VERSION))
+            if version > STATE_VERSION:
+                raise StateError(
+                    f"{self.path} was written by a newer slurmherd (state version {version}); "
+                    "upgrade slurmherd or move that file aside."
+                )
+            return State.from_dict(raw)
+        except StateError:
+            raise
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise StateError(f"state file {self.path} has an invalid structure: {exc}") from exc
 
     def save(self, state: State) -> None:
         ensure_dir(self.dir)
@@ -265,13 +284,14 @@ class Store:
         atomic_write(self.path, __import__("json").dumps(state.to_dict(), indent=2) + "\n")
 
     @contextlib.contextmanager
-    def transaction(self) -> Iterator[State]:
-        """Load, yield for mutation, then save -- all under an exclusive lock."""
+    def transaction(self, save: bool = True) -> Iterator[State]:
+        """Load and yield under an exclusive lock, optionally persisting changes."""
         ensure_dir(self.dir)
         with file_lock(self.lock_path):
             state = self.load()
             yield state
-            self.save(state)
+            if save:
+                self.save(state)
 
     # -- cluster facts ---------------------------------------------------
 

@@ -60,7 +60,7 @@ def progress_cell(entry: ExperimentState, width: int = 10, color: bool = True) -
 def attempts_cell(entry: ExperimentState, exp: Optional[Experiment]) -> str:
     if not entry.attempts:
         return "-"
-    total = len(entry.attempts)
+    total = entry.attempt
     if exp is not None and exp.restart.max_attempts < 1000:
         return f"{total}/{exp.restart.max_attempts}"
     return str(total)

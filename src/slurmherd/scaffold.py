@@ -18,7 +18,7 @@ PROJECT_TEMPLATE = """\
 #
 # This file says *where* work runs. The files under experiments/ say *what*
 # runs. slurmherd itself never writes to either -- its own bookkeeping lives in
-# .slurmherd/, which you can delete at any time.
+# .slurmherd/. Keep that directory: it records job IDs and restart budgets.
 #
 #   slurmherd doctor     check this config against the live cluster
 #   slurmherd plan       see what would be submitted
@@ -124,6 +124,12 @@ experiments:
 GITIGNORE_LINES = [".slurmherd/", "*.pyc", "__pycache__/"]
 
 
+def cluster_name_for(host: Optional[str], site: str) -> str:
+    """Return the cluster key written by :func:`write_scaffold`."""
+    raw = (host or site.split("-")[-1] or "cluster").split(".")[0]
+    return "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in raw)
+
+
 def write_scaffold(
     directory: Path,
     project: str,
@@ -143,8 +149,7 @@ def write_scaffold(
             + "\nOr start from `generic-slurm` and run `slurmherd site detect` later."
         )
 
-    cluster_name = (host or site.split("-")[-1] or "cluster").split(".")[0]
-    cluster_name = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in cluster_name)
+    cluster_name = cluster_name_for(host, site)
 
     account_hint = ""
     from .config import read_config_file

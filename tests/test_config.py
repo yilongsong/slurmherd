@@ -332,3 +332,75 @@ def test_yaml_boolean_name_gets_a_pointed_error(make_project):
         resolved(path)
     assert "parsed as a YAML boolean" in str(excinfo.value)
     assert 'name: "off"' in str(excinfo.value)
+
+
+def test_inline_experiments_inherit_project_defaults(make_project):
+    path = make_project(
+        BASE.replace(
+            "include: [experiments/*.yaml]",
+            """defaults:
+  cluster: a
+  enabled: false
+  resources: {partition: debug, time: "01:00:00"}
+  restart: {when: [failure], max_attempts: 2}
+experiments:
+  - name: inline
+    command: echo hi
+""",
+        )
+    )
+    exp = resolved(path).experiment("inline")
+    assert not exp.enabled
+    assert exp.resources.partition == "debug"
+    assert exp.restart.max_attempts == 2
+
+
+@pytest.mark.parametrize(
+    "entry, message",
+    [
+        ({"name": "bad/mame", "command": "echo hi"}, "name cannot contain"),
+        ({"name": "badmem", "command": "echo hi", "resources": {"mem": "1G", "mem_per_cpu": "1G"}}, "set only one"),
+        ({"name": "badregex", "command": "echo hi", "progress": {"kind": "log_regex", "pattern": "["}}, "invalid regular expression"),
+        ({"name": "badenv", "command": "echo hi", "env": {"exports": {"NOT-VALID": "x"}}}, "invalid shell variable"),
+    ],
+)
+def test_invalid_scheduler_inputs_fail_during_load(make_project, entry, message):
+    import yaml
+
+    path = make_project(BASE, main=yaml.safe_dump({"experiments": [entry]}))
+    with pytest.raises(ConfigError, match=message):
+        resolved(path)
+
+
+def test_first_contact_reresolves_remote_user_and_home(make_project):
+    from slurmherd.engine import Engine
+    from slurmherd.state import Store
+
+    path = make_project(
+        BASE.replace("remote_dir: /scratch/proj", 'remote_dir: "~/runs/{{ user }}"'),
+        main="""
+        experiments:
+          - name: first
+            owner: "{{ user }}"
+            command: echo hi
+        """,
+    )
+    config = load(path)
+
+    class Remote:
+        def ping(self):
+            return {
+                "user": "remote-user",
+                "home": "/home/remote-user",
+                "hostname": "login",
+                "python": "3.9",
+            }
+
+        def close(self):
+            pass
+
+    engine = Engine(config, Store(config.state_dir), transports={"a": Remote()})
+    engine.resolve_facts("a")
+    exp = config.experiment("first")
+    assert exp.owner == "remote-user"
+    assert exp.run_dir == "/home/remote-user/runs/remote-user/first"

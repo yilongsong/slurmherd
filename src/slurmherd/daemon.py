@@ -22,9 +22,9 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
-from .config import Config
+from .config import ClusterFacts, Config, available_sites, load as load_config
 from .engine import ActionKind, Engine, PassReport
 from .errors import StateError
 from .util import atomic_write, ensure_dir, iso, read_json, write_json
@@ -135,7 +135,7 @@ class Daemon:
             if not self.running():
                 return True
             time.sleep(0.1)
-        return True
+        return not bool(self.running())
 
     # -- logging ---------------------------------------------------------
 
@@ -176,8 +176,9 @@ class Daemon:
                 due = (time.time() - last_pass) >= self.interval
 
                 if edited:
-                    self.log("config changed on disk -- reconciling now")
-                    fingerprints = current
+                    if self._reload_config():
+                        self.log("config changed on disk -- reloaded")
+                    fingerprints = self._config_fingerprints()
 
                 if due or edited or passes == 0:
                     self._pass()
@@ -235,17 +236,54 @@ class Daemon:
         self.log(f"received signal {signum}; finishing up")
         self._stop = True
 
-    def _config_fingerprints(self) -> List[float]:
-        """Modification times of every file that feeds the config."""
+    def _reload_config(self) -> bool:
+        """Parse changed files and atomically replace the live configuration."""
+        try:
+            facts = {
+                name: ClusterFacts.from_dict(data)
+                for name, data in self.engine.store.facts().items()
+            }
+            refreshed = load_config(
+                self.config.file, facts={k: v for k, v in facts.items() if v}
+            )
+            if refreshed.state_dir != self.state_dir:
+                raise StateError(
+                    "paths.state_dir cannot change while the daemon is running; restart it"
+                )
+        except Exception as exc:  # keep the last valid configuration alive
+            self.log(f"config reload failed: {type(exc).__name__}: {exc}")
+            return False
+        self.config.project = refreshed.project
+        self.config.clusters = refreshed.clusters
+        self.config.experiments = refreshed.experiments
+        self.config.warnings = refreshed.warnings
+        return True
+
+    def _config_fingerprints(self) -> List[Tuple[str, float]]:
+        """Paths and mtimes for every file or directory that feeds config."""
         paths = [self.config.file] + [
             Path(exp.source_file) for exp in self.config.experiments if exp.source_file
         ]
-        stamps = []
-        for path in dict.fromkeys(paths):
+        # Directory mtimes reveal newly added files that did not exist at the
+        # previous load. The root also catches project-local site additions.
+        paths.append(self.config.root)
+        for pattern in self.config.project.include:
+            prefix = pattern
+            for marker in ("*", "?", "["):
+                prefix = prefix.split(marker, 1)[0]
+            parent = (self.config.root / prefix).parent
+            paths.append(parent)
+        catalogue = available_sites(self.config.root)
+        for loaded in self.config.clusters.values():
+            site_path = catalogue.get(loaded.spec.site)
+            if site_path:
+                paths.append(site_path)
+        stamps: List[Tuple[str, float]] = []
+        for path in dict.fromkeys(Path(item) for item in paths):
             try:
-                stamps.append(path.stat().st_mtime)
+                stamps.append((str(path), path.stat().st_mtime_ns))
             except OSError:
-                stamps.append(0.0)
+                stamps.append((str(path), 0.0))
         return stamps
 
 
@@ -266,7 +304,7 @@ After=network-online.target
 Type=simple
 WorkingDirectory={config.root}
 ExecStart={which} daemon run --interval {interval}
-Restart=always
+Restart=on-failure
 RestartSec=30
 
 [Install]

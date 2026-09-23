@@ -136,3 +136,19 @@ def test_agent_source_has_no_slurmherd_imports():
             assert node.module is None or not node.module.startswith("slurmherd")
         elif isinstance(node, ast.Import):
             assert all(not alias.name.startswith("slurmherd") for alias in node.names)
+
+
+def test_timeout_kills_the_whole_process_group():
+    import time
+
+    started = time.monotonic()
+    (result,) = run_agent([{"op": "run", "cmd": "sleep 10 & wait", "timeout": 1}])
+    assert result["rc"] == 124
+    assert time.monotonic() - started < 4
+
+
+def test_max_numeric_subdir_ignores_numeric_files(tmp_path):
+    (tmp_path / "000999").write_text("not a checkpoint directory")
+    (tmp_path / "000100").mkdir()
+    (result,) = run_agent([{"op": "max_numeric_subdir", "path": str(tmp_path)}])
+    assert result["value"] == 100

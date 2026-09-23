@@ -24,6 +24,8 @@ this model assumes the local filesystem is the one the job will see.
 from __future__ import annotations
 
 import dataclasses
+import math
+import re
 import typing
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -184,6 +186,32 @@ class Resources:
     extra: List[str] = field(default_factory=list)
     """Raw directives appended verbatim, e.g. ``["--hint=nomultithread"]``."""
 
+    def validate(self, path: Optional[str], key: str) -> None:
+        for name in ("nodes", "ntasks", "ntasks_per_node", "cpus_per_task"):
+            value = getattr(self, name)
+            if value is not None and value < 1:
+                raise ConfigError("must be >= 1", path, f"{key}.{name}")
+        memory = [
+            name
+            for name in ("mem", "mem_per_cpu", "mem_per_gpu")
+            if getattr(self, name)
+        ]
+        if len(memory) > 1:
+            raise ConfigError(
+                "set only one of mem, mem_per_cpu, or mem_per_gpu", path, key
+            )
+        if self.gpus and self.gres:
+            raise ConfigError("set either gpus or gres, not both", path, key)
+        if self.time and self.time.lower() != "infinite":
+            from .util import parse_walltime
+
+            if parse_walltime(self.time) is None:
+                raise ConfigError(
+                    "invalid walltime; use HH:MM:SS or D-HH:MM:SS",
+                    path,
+                    f"{key}.time",
+                )
+
 
 # --------------------------------------------------------------------------
 # Environment
@@ -210,6 +238,11 @@ class Env:
     exports: Dict[str, str] = field(default_factory=dict)
     setup: Optional[str] = None
     """Extra bash run after everything above. Multi-line is fine."""
+
+    def validate(self, path: Optional[str], key: str) -> None:
+        for name in self.exports:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ConfigError("invalid shell variable name", path, f"{key}.exports.{name}")
 
 
 # --------------------------------------------------------------------------
@@ -269,6 +302,15 @@ class Progress:
                 )
         if self.source not in ("out", "err", "both"):
             raise ConfigError(f"expected out/err/both, got {self.source!r}", path, f"{key}.source")
+        if self.target is not None and (not math.isfinite(self.target) or self.target < 0):
+            raise ConfigError("must be a finite number >= 0", path, f"{key}.target")
+        if not math.isfinite(self.scale) or self.scale <= 0:
+            raise ConfigError("must be a finite number > 0", path, f"{key}.scale")
+        if self.pattern:
+            try:
+                re.compile(self.pattern)
+            except re.error as exc:
+                raise ConfigError(f"invalid regular expression: {exc}", path, f"{key}.pattern") from exc
 
 
 COMPLETION_MODES = ("exit_zero", "progress_target", "log_match", "file_exists", "command", "never")
@@ -306,6 +348,11 @@ class Completion:
             raise ConfigError(
                 f"completion mode {self.when!r} requires {required!r}", path, f"{key}.{required}"
             )
+        if self.pattern:
+            try:
+                re.compile(self.pattern)
+            except re.error as exc:
+                raise ConfigError(f"invalid regular expression: {exc}", path, f"{key}.pattern") from exc
 
 
 RESTART_REASONS = ("timeout", "node_fail", "preempted", "oom", "failure", "cancelled")
@@ -341,6 +388,8 @@ class Restart:
                 )
         if self.max_attempts < 1:
             raise ConfigError("must be >= 1", path, f"{key}.max_attempts")
+        if self.delay < 0:
+            raise ConfigError("must be >= 0", path, f"{key}.delay")
 
 
 @dataclass
@@ -384,6 +433,12 @@ class Signal:
     batch: bool = True
     """Send to the batch script (``B:``) rather than to the job steps."""
 
+    def validate(self, path: Optional[str], key: str) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9]+", self.name):
+            raise ConfigError("invalid signal name", path, f"{key}.name")
+        if self.seconds < 0:
+            raise ConfigError("must be >= 0", path, f"{key}.seconds")
+
 
 @dataclass
 class Notify:
@@ -413,6 +468,15 @@ class Limits:
     max_submit_per_pass: Optional[int] = None
     """Cap on new submissions per reconcile pass. Default 8."""
     max_per_partition: Dict[str, int] = field(default_factory=dict)
+
+    def validate(self, path: Optional[str], key: str) -> None:
+        if self.max_running is not None and self.max_running < 0:
+            raise ConfigError("must be >= 0", path, f"{key}.max_running")
+        if self.max_submit_per_pass is not None and self.max_submit_per_pass < 1:
+            raise ConfigError("must be >= 1", path, f"{key}.max_submit_per_pass")
+        for partition, value in self.max_per_partition.items():
+            if value < 0:
+                raise ConfigError("must be >= 0", path, f"{key}.max_per_partition.{partition}")
 
 
 # --------------------------------------------------------------------------
@@ -470,6 +534,9 @@ class Site:
             raise ConfigError(
                 f"unsupported scheduler {self.scheduler!r}", path, "scheduler", hint="only 'slurm'"
             )
+        self.resources.validate(path, "resources")
+        self.env.validate(path, "env")
+        self.limits.validate(path, "limits")
 
 
 # --------------------------------------------------------------------------
@@ -499,6 +566,14 @@ class Connection:
     control_persist: int = 300
     """Seconds to keep a multiplexed SSH connection open. 0 disables sharing."""
     connect_timeout: int = 20
+
+    def validate(self, path: Optional[str], key: str) -> None:
+        if self.port is not None and not 1 <= self.port <= 65535:
+            raise ConfigError("must be between 1 and 65535", path, f"{key}.port")
+        if self.control_persist < 0:
+            raise ConfigError("must be >= 0", path, f"{key}.control_persist")
+        if self.connect_timeout < 1:
+            raise ConfigError("must be >= 1", path, f"{key}.connect_timeout")
 
 
 @dataclass
@@ -602,11 +677,17 @@ class Experiment:
     def validate(self, path: Optional[str], key: str) -> None:
         if not self.name:
             raise ConfigError("every experiment needs a name", path, key)
+        if any(ord(char) < 32 for char in self.name) or "/" in self.name or self.name in (".", ".."):
+            raise ConfigError("name cannot contain '/', path segments, or control characters", path, f"{key}.name")
         if not self.command.strip():
             raise ConfigError("every experiment needs a command", path, f"{key}.command")
+        self.resources.validate(path, f"{key}.resources")
+        self.env.validate(path, f"{key}.env")
         self.progress.validate(path, f"{key}.progress")
         self.completion.validate(path, f"{key}.completion")
         self.restart.validate(path, f"{key}.restart")
+        if self.signal:
+            self.signal.validate(path, f"{key}.signal")
         if self.completion.when == "progress_target":
             if self.progress.kind == "none":
                 raise ConfigError(

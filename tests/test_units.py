@@ -313,3 +313,27 @@ def test_render_table_fits_the_width():
         ["A", "B"], [["a-very-long-value" * 6, "b"]], max_width=40
     )
     assert all(len(line) <= 40 for line in text.splitlines())
+
+
+def test_job_script_has_a_project_identity_marker():
+    from slurmherd.models import Cluster
+    from slurmherd.render import job_marker
+
+    exp = make_exp()
+    script = render_script(
+        exp, Site(), Cluster(name="c"), RunPaths("/w/run", 1), "echo hi", project="proj"
+    )
+    assert f"#SBATCH --comment={job_marker('proj', exp)}" in script
+
+
+def test_parse_queue_reads_job_comment():
+    scheduler = SlurmScheduler()
+    row = "123|run|RUNNING|1:00|2:00|gpu|node|node|slurmherd:abc\n"
+    assert scheduler.parse_queue({"rc": 0, "out": row})["123"].comment == "slurmherd:abc"
+
+
+def test_scaffold_cluster_name_matches_init_guidance():
+    from slurmherd.scaffold import cluster_name_for
+
+    assert cluster_name_for("login.example.edu", "generic-slurm") == "login"
+    assert cluster_name_for(None, "umn-msi") == "msi"

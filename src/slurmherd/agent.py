@@ -20,14 +20,13 @@ The same code path runs locally (imported directly by the local transport), so
 a cluster you are sitting on behaves identically to one you SSH to.
 """
 
-from __future__ import annotations
-
 import base64
 import glob as globmod
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -91,13 +90,17 @@ def op_run(op):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
+            start_new_session=True,
         )
     except Exception as exc:
         return {"rc": 127, "out": "", "err": str(exc)}
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            proc.kill()
         out, err = proc.communicate()
         return {
             "rc": 124,
@@ -269,7 +272,9 @@ def op_max_numeric_subdir(op):
 
     for value, entry in numeric:
         candidate = os.path.join(path, entry)
-        if all(os.path.exists(os.path.join(candidate, r)) for r in require):
+        if os.path.isdir(candidate) and all(
+            os.path.exists(os.path.join(candidate, r)) for r in require
+        ):
             return {"value": value, "name": entry, "path": candidate, "total": len(numeric)}
     return {"value": None, "name": None, "total": len(numeric)}
 

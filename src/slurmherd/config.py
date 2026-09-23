@@ -378,6 +378,9 @@ def load(
     raw = read_config_file(project_file)
 
     project = build(Project, raw, path=str(project_file))
+    project.limits.validate(str(project_file), "limits")
+    project.defaults.resources.validate(str(project_file), "defaults.resources")
+    project.defaults.env.validate(str(project_file), "defaults.env")
     if project.version != 1:
         raise ConfigError(
             f"unsupported config version {project.version}",
@@ -399,6 +402,10 @@ def load(
 
     for name, spec in project.clusters.items():
         spec.name = name
+        spec.connect.validate(str(project_file), f"clusters.{name}.connect")
+        spec.resources.validate(str(project_file), f"clusters.{name}.resources")
+        spec.env.validate(str(project_file), f"clusters.{name}.env")
+        spec.limits.validate(str(project_file), f"clusters.{name}.limits")
         site_raw, site = load_site(spec.site, root, spec.site_overrides)
         cluster_facts = (facts or {}).get(name)
         if cluster_facts is None or not cluster_facts.resolved:
@@ -425,7 +432,9 @@ def load(
             loaded.facts.home,
         )
 
-    config.experiments = _load_experiments(config, raw_clusters, base_vars)
+    config.experiments = _load_experiments(
+        config, raw_clusters, base_vars, raw.get("experiments") or []
+    )
     _check_dependencies(config)
     return config
 
@@ -465,15 +474,17 @@ def _cluster_namespace(
 
 
 def _load_experiments(
-    config: Config, raw_clusters: Dict[str, Any], base_vars: Dict[str, Any]
+    config: Config,
+    raw_clusters: Dict[str, Any],
+    base_vars: Dict[str, Any],
+    inline_entries: Sequence[Any],
 ) -> List[Experiment]:
     """Read every experiment file and resolve each entry."""
     project_defaults = as_dict(config.project.defaults)
     sources: List[Tuple[Path, Dict[str, Any]]] = []
 
-    inline = [as_dict(e) for e in config.project.experiments]
-    if inline:
-        sources.append((config.file, {"experiments": inline}))
+    if inline_entries:
+        sources.append((config.file, {"experiments": inline_entries}))
 
     for pattern in config.project.include:
         matches = sorted(config.root.glob(pattern))

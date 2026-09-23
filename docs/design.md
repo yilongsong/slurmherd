@@ -41,7 +41,7 @@ replaces, which typically keep job ids in the same file as the experiment defini
 Once they are separate:
 
 - you can edit config while jobs run, and diff it, and commit it
-- state is disposable — delete it and running jobs are re-adopted by name next pass
+- state should be retained; if it is lost, marked running jobs are safely re-adopted, but attempt history is gone
 - the dashboard cannot corrupt your config, because it only writes state
 - "what I asked for" and "what is happening" are legible as separate things
 
@@ -69,7 +69,7 @@ default; `failure` is your problem and does not.
 These exist because the failure modes are expensive:
 
 - **Never cancel a job slurmherd did not submit** — every cancel goes through a tracked
-  job id, or one adopted by exact name match.
+  job id, or one adopted by matching both its name and project-specific scheduler marker.
 - **`owner:`** — on a shared config, an experiment owned by someone else is observed and
   never touched.
 - **`limits`** — a cap on concurrent and per-pass submissions, counting only slurmherd's

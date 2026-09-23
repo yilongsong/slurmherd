@@ -197,8 +197,8 @@ default. Application failures are reported and left stopped until you run
 ```text
 your machine                                      cluster
 ┌────────────────────────────┐       SSH       ┌─────────────────────────┐
-│ YAML + .slurmherd state   │ ◄───────────────► │ squeue / sacct / sbatch │
-│ SlurmHerd update loop     │                 │ job scripts and logs    │
+│ YAML + .slurmherd state    │ ◄─────────────► │ squeue / sacct / sbatch │
+│ SlurmHerd update loop      │                 │ job scripts and logs    │
 └────────────────────────────┘                 └─────────────────────────┘
 ```
 
